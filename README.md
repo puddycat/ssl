@@ -1,2 +1,2 @@
-# ssl
-Secure Socket Layer
+# SSL
+Tools to manage Secure Socket Layer encryption.
