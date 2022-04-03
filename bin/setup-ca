@@ -1,0 +1,264 @@
+#! /usr/bin/env bash
+#
+# ssl/bin/setup-ca
+#
+# raymondstrose@hotmail.com
+#
+#   Setup an SSL CA.
+#
+
+append () { sed -e "s?\$?$@?"; }
+prepend () { sed -e "s?^?$@?"; }
+indent () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "    "; }
+error () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: error: " >&2; }
+warning () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: warning: " >&2; }
+notice () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: notice: " >&2; }
+info () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: info: " >&2; }
+verbose () { $VERBOSE_MODE && { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: verbose: " >&2; } }
+debug () { $DEBUG_MODE && { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: debug: " >&2; } }
+
+function execute ()
+{
+    declare -a params;
+
+    for param; do
+        if [[ -z "${param}" || "${param}" =~ [^A-Za-z0-9_@%+=:,./-] ]]; then
+            params+=("'${param//\'/\'\"\'\"\'}'");
+        else
+            params+=("${param}");
+        fi;
+    done;
+
+    debug "${params[*]}";
+    eval ${params[*]};
+}
+
+apply_manifests ()
+{
+	debug "Applying manifests:";
+	exit_code=0;
+
+	for name in manifest/*.yaml; do
+		debug "Applying manifest: $name";
+		kubectl apply -f "$name" || exit_code=1;
+	done;
+
+	return $exit_code;
+}
+
+main ()
+{
+    usage ()
+    {
+        cat <<-EOF >&2
+			$PROGNAME: usage: $PROGNAME [--help] [--debug]
+
+			--help                         Display this usage information.
+			--debug                        Enable debug mode.
+			EOF
+
+        return 0;
+    }
+
+    export PROGNAME=`basename "$0"`;
+    export PROGDIR=`dirname "$0"`;
+    export INSTALL_DIR=`dirname "$PROGDIR"`; [ "$INSTALL_DIR" = "." ] && INSTALL_DIR=$(pwd);
+    export DEBUG_MODE=false;
+    export DEBUG_ARGS="";
+    export VERBOSE_MODE=false;
+	export NAMESPACE="ssl";
+	export DEPLOYMENT_NAME="ssl";
+	export SERVICE_NAME="ssl";
+	export SERVICE_TYPE="ClusterIP";
+	export NGINX_INGRESS=false;
+	export TRAEFIK_INGRESS=true;
+	export CA_NAME="local-ca";
+	export CA_NAME2="nginx-ca";
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --deployment-name|--deployment-name=?*)
+            case "$1" in
+            --deployment-name)	DEPLOYMENT_NAME="$2"; shift;;
+            --deployment-name=?*)	DEPLOYMENT_NAME="${1#--deployment-name=}";;
+            esac;;
+        --service-type|--service-type=?*)
+            case "$1" in
+            --service-type)	SERVICE_TYPE="$2"; shift;;
+            --service-type=?*)	SERVICE_TYPE="${1#--service-type=}";;
+            esac;;
+        --service-name|--service-name=?*)
+            case "$1" in
+            --service-name)	SERVICE_NAME="$2"; shift;;
+            --service-name=?*)	SERVICE_NAME="${1#--service-name=}";;
+            esac;;
+        --namespace|--namespace=?*)
+            case "$1" in
+            --namespace)	NAMESPACE="$2"; shift;;
+            --namespace=?*)	NAMESPACE="${1#--namespace=}";;
+            esac;;
+        --verbose)	VERBOSE_MODE=true;;
+        --debug)	$DEBUG_MODE && set -x; DEBUG_MODE=true; DEBUG_ARGS="$DEBUG_ARGS --debug";;
+        --help) usage; return 2;;
+        -*)	error "unknown option \"$1\"";
+            usage; return 1;;
+        *)	error "unknown option \"$1\"";
+            usage; return 1;;
+        esac;
+
+        shift;
+    done;
+
+# Create namespace(s)
+	if [ -f  $INSTALL_DIR/manifest/namespace.yaml ]; then
+		execute kubectl apply -f $INSTALL_DIR/manifest/namespace.yaml || return 1;
+	fi;
+
+# Create CA
+# https://deliciousbrains.com/ssl-certificate-authority-for-local-https-development/
+	if [ ! -d  $INSTALL_DIR/manifest/secrets ]; then
+		execute mkdir -p $INSTALL_DIR/manifest/secrets || return 1;
+	fi;
+
+	#openssl genrsa -des3 -out $INSTALL_DIR/manifest/secrets/myCA.key 2048;
+	openssl genrsa -out $INSTALL_DIR/manifest/secrets/myCA.key 2048;
+
+	openssl req	\
+		-x509	\
+		-new	\
+		-nodes	\
+		-key $INSTALL_DIR/manifest/secrets/myCA.key	\
+		-sha256	\
+		-days 1825	\
+		-subj "/C=UK/ST=London/L=The Cloud/O=TechSquid CA" \
+		-out $INSTALL_DIR/manifest/secrets/myCA.pem;
+
+	if [ -f $INSTALL_DIR/manifest/secrets/myCA.key -a -f $INSTALL_DIR/manifest/secrets/myCA.pem ]; then
+		execute kubectl	\
+			create secret tls $CA_NAME2	\
+			--namespace $NAMESPACE	\
+			--key=$INSTALL_DIR/manifest/secrets/myCA.key	\
+			--cert=$INSTALL_DIR/manifest/secrets/myCA.pem
+	fi;
+
+# Create CA
+	openssl req \
+		-new \
+		-newkey rsa:2048 \
+		-days 365 \
+		-nodes \
+		-x509 \
+		-subj "/C=UK/ST=London/L=The Cloud/O=TechSquid CA" \
+		-keyout "$INSTALL_DIR/manifest/secrets/ca.key" \
+		-out "$INSTALL_DIR/manifest/secrets/ca.crt";
+
+	if [ -f $INSTALL_DIR/manifest/secrets/ca.key -a -f $INSTALL_DIR/manifest/secrets/ca.crt ]; then
+		execute kubectl	\
+			create secret tls $CA_NAME	\
+			--namespace $NAMESPACE	\
+			--key=$INSTALL_DIR/manifest/secrets/ca.key	\
+			--cert=$INSTALL_DIR/manifest/secrets/ca.crt
+
+		if [ $? -ne 0 ]; then
+			execute kubectl	\
+				apply secret tls $CA_NAME	\
+				--namespace $NAMESPACE	\
+				--key=$INSTALL_DIR/manifest/secrets/ca.key	\
+				--cert=$INSTALL_DIR/manifest/secrets/ca.crt
+		fi;
+	fi;
+
+# Verify the certificate
+	execute openssl x509 -in $INSTALL_DIR/manifest/secrets/ca.crt -noout -text;
+
+	if [ -f $INSTALL_DIR/manifest/secrets/ca.key -a -f $INSTALL_DIR/manifest/secrets/ca.crt ]; then
+		execute kubectl --namespace $NAMESPACE	\
+			create secret tls ca	\
+			--key=$INSTALL_DIR/manifest/secrets/ca.key	\
+			--cert=$INSTALL_DIR/manifest/secrets/ca.crt;
+
+		if [ $? -ne 0 ]; then
+			execute kubectl --namespace $NAMESPACE	\
+				apply secret tls ca	\
+				--key=$INSTALL_DIR/manifest/secrets/ca.key	\
+				--cert=$INSTALL_DIR/manifest/secrets/ca.crt
+		fi;
+	fi;
+
+# Configure secrets
+#	execute openssl req -x509	\
+#		-nodes	\
+#		-days 365	\
+#		-newkey rsa:2048	\
+#		-keyout $INSTALL_DIR/manifest/secrets/tls-rancher.key	\
+#		-out $INSTALL_DIR/manifest/secrets/tls-rancher.cert	\
+#		-subj "/CN=macbook-pro-2"
+	execute openssl genrsa -out "$INSTALL_DIR/manifest/secrets/tls-rancher.key" 2048;
+
+	if [ ! -f $INSTALL_DIR/manifest/secrets/openssl.conf ]; then
+		error "$INSTALL_DIR/manifest/secrets/openssl.conf: not found";
+		return 1;
+	fi;
+
+	if [ ! -f $INSTALL_DIR/manifest/secrets/tls-rancher.key ]; then
+		error "$INSTALL_DIR/manifest/secrets/tls-rancher.key: not found";
+		return 1;
+	fi;
+
+	execute openssl req	\
+		-new	\
+		-key $INSTALL_DIR/manifest/secrets/tls-rancher.key	\
+		-out $INSTALL_DIR/manifest/secrets/tls-rancher.csr	\
+		-config $INSTALL_DIR/manifest/secrets/openssl.conf;
+
+	if [ $? -ne 0 ]; then
+		return 1;
+	fi;
+
+	execute openssl x509	\
+		-req	\
+		-days 365	\
+		-in $INSTALL_DIR/manifest/secrets/tls-rancher.csr	\
+		-CAkey "$INSTALL_DIR/manifest/secrets/ca.key" \
+		-CA "$INSTALL_DIR/manifest/secrets/ca.crt"	\
+		-CAcreateserial	\
+		-extensions v3_req	\
+		-extfile $INSTALL_DIR/manifest/secrets/openssl.conf	\
+		-out $INSTALL_DIR/manifest/secrets/tls-rancher.crt;
+
+	if [ $? -ne 0 ]; then
+		return 1;
+	fi;
+
+# Verify the certificate
+	execute openssl x509 -in $INSTALL_DIR/manifest/secrets/tls-rancher.crt -noout -text;
+
+	if [ $? -ne 0 ]; then
+		return 1;
+	fi;
+
+	if [ -f $INSTALL_DIR/manifest/secrets/tls-rancher.key -a -f $INSTALL_DIR/manifest/secrets/tls-rancher.crt ]; then
+		execute kubectl --namespace $NAMESPACE	\
+			create secret tls tls-rancher	\
+			--key=$INSTALL_DIR/manifest/secrets/tls-rancher.key	\
+			--cert=$INSTALL_DIR/manifest/secrets/tls-rancher.crt;
+
+		if [ $? -ne 0 ]; then
+			execute kubectl --namespace $NAMESPACE	\
+				apply secret tls tls-rancher	\
+				--key=$INSTALL_DIR/manifest/secrets/tls-rancher.key	\
+				--cert=$INSTALL_DIR/manifest/secrets/tls-rancher.crt
+		fi;
+	fi;
+
+# Configure a certificate issuer
+	execute kubectl apply -f $INSTALL_DIR/manifest/issuer/rancher.yaml || return 1;
+
+	execute kubectl apply -f $INSTALL_DIR/manifest/issuer/ca.yaml || return 1;
+	execute kubectl apply -f $INSTALL_DIR/manifest/issuer/local-ca.yaml || return 1;
+
+	return 0;
+}
+
+	main "$@";
+
