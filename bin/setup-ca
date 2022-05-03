@@ -106,6 +106,48 @@ install ()
 		return 0;
 	}
 
+	issuer_ca ()
+	{
+		ISSUER_NAME="ca";
+		ISSUER_NAMESPACE="$NAMESPACE";
+		ISSUER_SECRETNAME="ca";
+		ISSUER_APP="$NAMESPACE";
+		ISSUER_RELEASE="$NAMESPACE";
+
+		cat <<-EOF
+			kind: Issuer
+			apiVersion: cert-manager.io/v1
+			metadata:
+			  generation: 1
+			  labels:
+				app: $ISSUER_APP
+				release: $ISSUER_RELEASE
+			  name: $ISSUER_NAME
+			  namespace: $ISSUER_NAMESPACE
+			  resourceVersion: "3390"
+			spec:
+			  ca:
+				secretName: $ISSUER_SECRETNAME
+			EOF
+	}
+
+	rancher_ca ()
+	{
+		cat <<-EOF
+			apiVersion: cert-manager.io/v1
+			kind: Issuer
+			metadata:
+			  labels:
+				app: jenkins
+				release: jenkins
+			  name: tls-rancher
+			  resourceVersion: "0"
+			spec:
+			  ca:
+				secretName: jenkins-ca
+			EOF
+	}
+
 	SECRETS_DIR="$INSTALL_DIR/manifest/secrets";
 	ISSUER_DIR="$INSTALL_DIR/manifest/issuer";
 
@@ -227,17 +269,22 @@ install ()
 		fi;
 	fi;
 
-# Configure a certificate issuer
-	if [ -f $ISSUER_DIR/rancher.yaml ]; then
-		execute kubectl --namespace $NAMESPACE apply -f $ISSUER_DIR/rancher.yaml || return 1;
-	fi;
+	if true; then
+		execute issuer_ca | sed -e 's?^\t*??' | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
+		execute rancher_ca | sed -e 's?^\t*??' | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
+	else
+	# Configure a certificate issuer
+		if [ -f $ISSUER_DIR/rancher.yaml ]; then
+			execute kubectl --namespace $NAMESPACE apply -f $ISSUER_DIR/rancher.yaml || return 1;
+		fi;
 
-#	if [ -f $ISSUER_DIR/ca.yaml ]; then
-#		execute kubectl --namespace $NAMESPACE apply -f $ISSUER_DIR/ca.yaml || return 1;
-#	fi;
+	#	if [ -f $ISSUER_DIR/ca.yaml ]; then
+	#		execute kubectl --namespace $NAMESPACE apply -f $ISSUER_DIR/ca.yaml || return 1;
+	#	fi;
 
-	if [ -f $ISSUER_DIR/local-ca.yaml ]; then
-		execute kubectl --namespace $NAMESPACE apply --name=$CA_NAME -f $ISSUER_DIR/local-ca.yaml || return 1;
+		if [ -f $ISSUER_DIR/local-ca.yaml ]; then
+			execute kubectl --namespace $NAMESPACE apply --name=$CA_NAME -f $ISSUER_DIR/local-ca.yaml || return 1;
+		fi;
 	fi;
 
 	return 0;
@@ -248,32 +295,66 @@ remove ()
 	remove_secret_name ()
 	{
 		#execute kubectl get --namespace $NAMESPACE secrets $1 || return 0;
-		execute kubectl get --namespace $NAMESPACE secrets $1 >/dev/null || return 0;
+		#execute kubectl get --namespace $NAMESPACE secrets $1 >/dev/null 2>&1 || return 0;
+		execute kubectl get --namespace $NAMESPACE secrets $1 >/dev/null 2>&1;
+
+		if [ $? -ne 0 ]; then
+			debug "namespace $NAMESPACE: secret $1 not found";
+			return 0;
+		fi;
+
 		execute kubectl delete --namespace $NAMESPACE secrets $1 || return 1;
 		return 0;
 	}
 
+	remove_issuer_ca ()
+	{
+		ISSUER_NAME="ca";
+		ISSUER_NAMESPACE="$NAMESPACE";
+		ISSUER_SECRETNAME="ca";
+		ISSUER_APP="$NAMESPACE";
+		ISSUER_RELEASE="$NAMESPACE";
+
+		remove_secret_name $ISSUER_NAME || return $?;
+
+		return 0;
+	}
+
+	remove_rancher_ca ()
+	{
+		ISSUER_NAME="tls-rancher";
+
+		remove_secret_name $ISSUER_NAME || return $?;
+
+		return 0;
+	}
+
+	#execute remove_issuer_ca | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
+	#execute remove_rancher_ca | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
+	execute remove_issuer_ca || return 1;
+	execute remove_rancher_ca || return 1;
+
 #	execute kubectl --namespace $NAMESPACE	\
 #		delete secret tls tls-rancher || return 1;
-	remove_secret_name tls-rancher || return $?;
-	remove_secret_name tls || return $?;
-	remove_secret_name nginx-ca || return $?;
-	remove_secret_name local-ca || return $?;
-	remove_secret_name ca || return $?;
-	remove_secret_name $CA_NAME || return $?;
-	remove_secret_name $CA_NAME2 || return $?;
+	#remove_secret_name tls-rancher || return $?;
+	#remove_secret_name tls || return $?;
+	#remove_secret_name nginx-ca || return $?;
+	#remove_secret_name local-ca || return $?;
+	#remove_secret_name ca || return $?;
+	#remove_secret_name $CA_NAME || return $?;
+	#remove_secret_name $CA_NAME2 || return $?;
 
-	if [ -f $INSTALL_DIR/manifest/issuer/rancher.yaml ]; then
-		execute kubectl --namespace $NAMESPACE delete -f $INSTALL_DIR/manifest/issuer/rancher.yaml || return 1;
-	fi;
-
-	if [ -f $INSTALL_DIR/manifest/issuer/ca.yaml ]; then
-		execute kubectl --namespace $NAMESPACE delete -f $INSTALL_DIR/manifest/issuer/ca.yaml || return 1;
-	fi;
-
-	if [ -f $INSTALL_DIR/manifest/issuer/local-ca.yaml ]; then
-		execute kubectl --namespace $NAMESPACE delete -f $INSTALL_DIR/manifest/issuer/local-ca.yaml || return 1;
-	fi;
+#	if [ -f $INSTALL_DIR/manifest/issuer/rancher.yaml ]; then
+#		execute kubectl --namespace $NAMESPACE delete -f $INSTALL_DIR/manifest/issuer/rancher.yaml || return 1;
+#	fi;
+#
+#	if [ -f $INSTALL_DIR/manifest/issuer/ca.yaml ]; then
+#		execute kubectl --namespace $NAMESPACE delete -f $INSTALL_DIR/manifest/issuer/ca.yaml || return 1;
+#	fi;
+#
+#	if [ -f $INSTALL_DIR/manifest/issuer/local-ca.yaml ]; then
+#		execute kubectl --namespace $NAMESPACE delete -f $INSTALL_DIR/manifest/issuer/local-ca.yaml || return 1;
+#	fi;
 
 	return 0;
 }
