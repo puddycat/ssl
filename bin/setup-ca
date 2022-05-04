@@ -114,37 +114,42 @@ install ()
 		ISSUER_APP="$NAMESPACE";
 		ISSUER_RELEASE="$NAMESPACE";
 
-		cat <<-EOF
+		cat <<-EOF | sed -e 's?^\t*??'
 			kind: Issuer
 			apiVersion: cert-manager.io/v1
 			metadata:
 			  generation: 1
 			  labels:
-				app: $ISSUER_APP
-				release: $ISSUER_RELEASE
+			    app: $ISSUER_APP
+			    release: $ISSUER_RELEASE
 			  name: $ISSUER_NAME
 			  namespace: $ISSUER_NAMESPACE
 			  resourceVersion: "3390"
 			spec:
 			  ca:
-				secretName: $ISSUER_SECRETNAME
+			    secretName: $ISSUER_SECRETNAME
 			EOF
 	}
 
 	rancher_ca ()
 	{
-		cat <<-EOF
+		ISSUER_NAME="tls-rancher";
+		ISSUER_SECRETNAME="jenkins-ca";
+		ISSUER_APP="$NAMESPACE";
+		ISSUER_RELEASE="$NAMESPACE";
+
+		cat <<-EOF | sed -e 's?^\t*??'
 			apiVersion: cert-manager.io/v1
 			kind: Issuer
 			metadata:
 			  labels:
-				app: jenkins
-				release: jenkins
-			  name: tls-rancher
+			    app: $ISSUER_APP
+			    release: $ISSUER_RELEASE
+			  name: $ISSUER_NAME
 			  resourceVersion: "0"
 			spec:
 			  ca:
-				secretName: jenkins-ca
+			    secretName: $ISSUER_SECRETNAME
 			EOF
 	}
 
@@ -270,7 +275,10 @@ install ()
 	fi;
 
 	if true; then
-		execute issuer_ca | sed -e 's?^\t*??' | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
+		#execute issuer_ca | sed -e 's?^\t*??' | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
+		YAML=$(execute issuer_ca);
+		debug "Issuer CA YAML:\n$YAML";
+		echo "$YAML" | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
 		execute rancher_ca | sed -e 's?^\t*??' | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
 	else
 	# Configure a certificate issuer
