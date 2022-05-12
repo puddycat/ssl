@@ -61,20 +61,29 @@ install ()
 # Generate a new key
 	generate_new_key ()
 	{
-		if [ ! -d  "$SECRETS_DIR" ]; then
-			execute mkdir -p "$SECRETS_DIR" || return 1;
+		CA_KEY_DIR="$(dirname $CA_KEY_FILE)";
+
+		if [ ! -d  "$CA_KEY_DIR" ]; then
+			execute mkdir -p "$CA_KEY_DIR" || return 1;
 		fi;
 
-		#execute openssl genrsa -des3 -out "$SECRETS_DIR/myCA.key" 2048 || return $?;
-		execute openssl genrsa -out "$SECRETS_DIR/myCA.key" 2048 || return $?;
+		#execute openssl genrsa -des3 -out "$CA_KEY_FILE" 2048 || return $?;
+		execute openssl genrsa -out "$CA_KEY_FILE" 2048 || return $?;
 
 		return 0;
+	}
+
+# Verify a certificate
+	verify_certificate ()
+	{
+		CERT_FILE="$1";
+		execute openssl x509 -in "$CERT_FILE" -noout -text;
 	}
 
 # Generate a key
 	generate_key ()
 	{
-		if [ -f "$SECRETS_DIR/myCA.key" ]; then
+		if [ -f "$CA_KEY_FILE" ]; then
 			return 0;
 		fi;
 
@@ -89,18 +98,22 @@ install ()
 			-x509	\
 			-new	\
 			-nodes	\
-			-key $SECRETS_DIR/myCA.key	\
+			-key "$CA_KEY_FILE"	\
 			-sha256	\
 			-days 1825	\
 			-subj "/C=UK/ST=London/L=The Cloud/O=TechSquid CA" \
-			-out $SECRETS_DIR/myCA.pem;
+			-out "$CA_PEM_FILE";
 
-		if [ -f "$SECRETS_DIR/myCA.key" -a -f "$SECRETS_DIR/myCA.pem" ]; then
-			execute kubectl	\
-				create secret tls $CA_NAME	\
-				--namespace $NAMESPACE	\
-				--key="$SECRETS_DIR/myCA.key"	\
-				--cert="$SECRETS_DIR/myCA.pem";
+		execute verify_certificate "$CA_PEM_FILE" || return 1;
+
+		if true; then
+			if [ -f "$CA_KEY_FILE" -a -f "$CA_PEM_FILE" ]; then
+				execute kubectl	\
+					create secret tls $CA_NAME	\
+					--namespace $NAMESPACE	\
+					--key="$CA_KEY_FILE"	\
+					--cert="$CA_PEM_FILE";
+			fi;
 		fi;
 
 		return 0;
@@ -108,12 +121,6 @@ install ()
 
 	issuer_ca ()
 	{
-		ISSUER_NAME="ca";
-		ISSUER_NAMESPACE="$NAMESPACE";
-		ISSUER_SECRETNAME="ca";
-		ISSUER_APP="$NAMESPACE";
-		ISSUER_RELEASE="$NAMESPACE";
-
 		cat <<-EOF | sed -e 's?^\t*??'
 			kind: Issuer
 			apiVersion: cert-manager.io/v1
@@ -127,183 +134,245 @@ install ()
 			  resourceVersion: "3390"
 			spec:
 			  ca:
-			    secretName: $ISSUER_SECRETNAME
+			    secretName: $TLS_RANCHER_SECRET_NAME
 			EOF
 	}
 
-	rancher_ca ()
+	tls_rancher ()
 	{
-		ISSUER_NAME="tls-rancher";
-		ISSUER_SECRETNAME="jenkins-ca";
-		ISSUER_APP="$NAMESPACE";
-		ISSUER_RELEASE="$NAMESPACE";
+		rancher_ca ()
+		{
+			#ISSUER_NAME="tls-rancher";
+			ISSUER_NAME="$CA_NAME";
+			ISSUER_SECRETNAME="$TLS_RANCHER_SECRET_NAME";
+			ISSUER_APP="$NAMESPACE";
+			ISSUER_RELEASE="$NAMESPACE";
 
-		cat <<-EOF | sed -e 's?^\t*??'
-			apiVersion: cert-manager.io/v1
-			kind: Issuer
-			metadata:
-			  labels:
-			    app: $ISSUER_APP
-			    release: $ISSUER_RELEASE
-			  name: $ISSUER_NAME
-			  resourceVersion: "0"
-			spec:
-			  ca:
-			    secretName: $ISSUER_SECRETNAME
-			EOF
+			cat <<-EOF | sed -e 's?^\t*??'
+				apiVersion: cert-manager.io/v1
+				kind: Issuer
+				metadata:
+				  labels:
+					app: $ISSUER_APP
+					release: $ISSUER_RELEASE
+				  name: $ISSUER_NAME
+				  resourceVersion: "0"
+				spec:
+				  ca:
+					secretName: $ISSUER_SECRETNAME
+				EOF
+		}
+
+	# Configure secrets
+	#	execute openssl req -x509	\
+	#		-nodes	\
+	#		-days 365	\
+	#		-newkey rsa:2048	\
+	#		-keyout $TLS_RANCHER_KEY_FILE	\
+	#		-out $SECRETS_DIR/$TLS_RANCHER_SECRET_NAME.cert	\
+	#		-subj "/CN=macbook-pro-2"
+		execute openssl genrsa -out "$TLS_RANCHER_KEY_FILE" 2048;
+
+		if [ ! -f $OPENSSL_CONF_FILE ]; then
+			error "$OPENSSL_CONF_FILE: not found";
+			return 1;
+		fi;
+
+		if [ ! -f "$TLS_RANCHER_KEY_FILE" ]; then
+			error "$TLS_RANCHER_KEY_FILE: not found";
+			return 1;
+		fi;
+
+		execute openssl req	\
+			-new	\
+			-key "$TLS_RANCHER_KEY_FILE"	\
+			-out "$TLS_RANCHER_CSR_FILE"	\
+			-config "$OPENSSL_CONF_FILE";
+
+		if [ $? -ne 0 ]; then
+			return 1;
+		fi;
+
+		execute openssl x509	\
+			-req	\
+			-days 365	\
+			-in "$TLS_RANCHER_CSR_FILE"	\
+			-CAkey "$CA_KEY_FILE" \
+			-CA "$CA_CERT_FILE"	\
+			-CAcreateserial	\
+			-extensions v3_req	\
+			-extfile "$OPENSSL_CONF_FILE"	\
+			-out "$TLS_RANCHER_CRT_FILE";
+
+		if [ $? -ne 0 ]; then
+			return 1;
+		fi;
+
+	# Verify the certificate
+		execute verify_certificate "$TLS_RANCHER_CRT_FILE" || return 1;
+
+		if [ -f "$TLS_RANCHER_KEY_FILE" -a -f "$TLS_RANCHER_CRT_FILE" ]; then
+			execute kubectl --namespace $NAMESPACE	\
+				create secret tls $TLS_RANCHER_SECRET_NAME	\
+				--key="$TLS_RANCHER_KEY_FILE"	\
+				--cert="$TLS_RANCHER_CRT_FILE";
+
+			if [ $? -ne 0 ]; then
+				execute kubectl --namespace $NAMESPACE	\
+					apply secret tls $TLS_RANCHER_SECRET_NAME	\
+					--key="$TLS_RANCHER_KEY_FILE"	\
+					--cert="$TLS_RANCHER_CRT_FILE";
+			fi;
+		fi;
+
+		if true; then
+			if false; then
+				YAML=$(execute rancher_ca);
+				debug "Rancher CA YAML:\n$YAML";
+				echo "$YAML" | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
+			fi;
+
+			if true; then
+				YAML=$(execute issuer_ca);
+				debug "Issuer CA YAML:\n$YAML";
+				echo "$YAML" | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
+			fi;
+		else
+		# Configure a certificate issuer
+			if [ -f $ISSUER_DIR/rancher.yaml ]; then
+				execute kubectl --namespace $NAMESPACE apply -f $ISSUER_DIR/rancher.yaml || return 1;
+			fi;
+
+		#	if [ -f $ISSUER_DIR/ca.yaml ]; then
+		#		execute kubectl --namespace $NAMESPACE apply -f $ISSUER_DIR/ca.yaml || return 1;
+		#	fi;
+
+			if [ -f $ISSUER_DIR/local-ca.yaml ]; then
+				execute kubectl --namespace $NAMESPACE apply --name=$CA_NAME -f $ISSUER_DIR/local-ca.yaml || return 1;
+			fi;
+		fi;
+
+		return 0;
 	}
 
-	SECRETS_DIR="$INSTALL_DIR/manifest/secrets";
-	ISSUER_DIR="$INSTALL_DIR/manifest/issuer";
+	old_namespace_ca ()
+	{
+	# Create CA
+	# https://deliciousbrains.com/ssl-certificate-authority-for-local-https-development/
+		generate_key || return $?;
+
+		sign_key;
+
+	# Create CA
+		if true; then
+			if [ ! -f "$OPENSSL_CONF_FILE" ]; then
+				error "$OPENSSL_CONF_FILE: not found";
+				return 1;
+			fi;
+
+			if true; then
+				if false; then
+					execute openssl req \
+						-new \
+						-newkey rsa:2048 \
+						-days 365 \
+						-nodes \
+						-x509 \
+						-subj "/C=UK/ST=London/L=The Cloud/O=TechSquid CA" \
+						-keyout "$CA_KEY_FILE" \
+						-out "$CA_CERT_FILE";
+
+					execute verify_certificate "$CA_CERT_FILE" || return 1;
+				fi;
+
+				if true; then
+					execute openssl req	\
+						-new	\
+						-key "$CA_KEY_FILE"	\
+						-out "$CA_CSR_FILE"	\
+						-config "$OPENSSL_CONF_FILE";
+
+					if [ $? -ne 0 ]; then
+						return 1;
+					fi;
+
+					execute openssl x509	\
+						-req	\
+						-days 365	\
+						-in "$CA_CSR_FILE"	\
+						-CAkey "$CA_KEY_FILE" \
+						-CA "$CA_CERT_FILE"	\
+						-CAcreateserial	\
+						-extensions v3_req	\
+						-extfile "$OPENSSL_CONF_FILE"	\
+						-out "$CA_PEM_FILE";
+
+					if [ $? -ne 0 ]; then
+						return 1;
+					fi;
+
+					execute verify_certificate "$CA_PEM_FILE" || return 1;
+				fi;
+
+				if true; then
+					if [ -f "$CA_KEY_FILE" -a -f "$CA_PEM_FILE" ]; then
+						execute kubectl	\
+							create secret tls $CA_NAME	\
+							--namespace $NAMESPACE	\
+							--key="$CA_KEY_FILE"	\
+							--cert="$CA_PEM_FILE";
+					fi;
+				fi;
+			fi;
+
+			if false; then
+				if [ -f $CA_KEY_FILE -a -f $CA_CERT_FILE ]; then
+					execute kubectl	\
+						create secret tls $CA_NAME2	\
+						--namespace $NAMESPACE	\
+						--key="$CA_KEY_FILE"	\
+						--cert="$CA_CERT_FILE";
+
+					if [ $? -ne 0 ]; then
+						execute kubectl	\
+							apply secret tls $CA_NAME	\
+							--namespace $NAMESPACE	\
+							--key="$CA_KEY_FILE"	\
+							--cert="$CA_CERT_FILE";
+					fi;
+				fi;
+			fi;
+		fi;
+
+	# Verify the certificate
+	#	execute openssl x509 -in $CA_CERT_FILE -noout -text;
+	}
 
 	create_namespaces || return $?;
 
-# Create CA
-# https://deliciousbrains.com/ssl-certificate-authority-for-local-https-development/
-	generate_key || return $?;
-
-	sign_key;
-
-## Create CA
-#	execute openssl req \
-#		-new \
-#		-newkey rsa:2048 \
-#		-days 365 \
-#		-nodes \
-#		-x509 \
-#		-subj "/C=UK/ST=London/L=The Cloud/O=TechSquid CA" \
-#		-keyout "$SECRETS_DIR/ca.key" \
-#		-out "$SECRETS_DIR/ca.crt";
-#
-#	if [ -f $SECRETS_DIR/ca.key -a -f $SECRETS_DIR/ca.crt ]; then
-#		execute kubectl	\
-#			create secret tls $CA_NAME2	\
-#			--namespace $NAMESPACE	\
-#			--key=$SECRETS_DIR/ca.key	\
-#			--cert=$SECRETS_DIR/ca.crt
-#
-#		if [ $? -ne 0 ]; then
-#			execute kubectl	\
-#				apply secret tls $CA_NAME	\
-#				--namespace $NAMESPACE	\
-#				--key=$SECRETS_DIR/ca.key	\
-#				--cert=$SECRETS_DIR/ca.crt
-#		fi;
-#	fi;
-#
-## Verify the certificate
-#	execute openssl x509 -in $SECRETS_DIR/ca.crt -noout -text;
-
-#	if [ -f $SECRETS_DIR/ca.key -a -f $SECRETS_DIR/ca.crt ]; then
-#		execute kubectl --namespace $NAMESPACE	\
-#			create secret tls ca	\
-#			--key=$SECRETS_DIR/ca.key	\
-#			--cert=$SECRETS_DIR/ca.crt;
-#
-#		if [ $? -ne 0 ]; then
-#			execute kubectl --namespace $NAMESPACE	\
-#				apply secret tls ca	\
-#				--key=$SECRETS_DIR/ca.key	\
-#				--cert=$SECRETS_DIR/ca.crt
-#		fi;
-#	fi;
-
-# Configure secrets
-#	execute openssl req -x509	\
-#		-nodes	\
-#		-days 365	\
-#		-newkey rsa:2048	\
-#		-keyout $SECRETS_DIR/tls-rancher.key	\
-#		-out $SECRETS_DIR/tls-rancher.cert	\
-#		-subj "/CN=macbook-pro-2"
-	execute openssl genrsa -out "$SECRETS_DIR/tls-rancher.key" 2048;
-
-	if [ ! -f $SECRETS_DIR/openssl.conf ]; then
-		error "$SECRETS_DIR/openssl.conf: not found";
-		return 1;
-	fi;
-
-	if [ ! -f $SECRETS_DIR/tls-rancher.key ]; then
-		error "$SECRETS_DIR/tls-rancher.key: not found";
-		return 1;
-	fi;
-
-	execute openssl req	\
-		-new	\
-		-key $SECRETS_DIR/tls-rancher.key	\
-		-out $SECRETS_DIR/tls-rancher.csr	\
-		-config $SECRETS_DIR/openssl.conf;
-
-	if [ $? -ne 0 ]; then
-		return 1;
-	fi;
-
-	execute openssl x509	\
-		-req	\
-		-days 365	\
-		-in $SECRETS_DIR/tls-rancher.csr	\
-		-CAkey "$SECRETS_DIR/ca.key" \
-		-CA "$SECRETS_DIR/ca.crt"	\
-		-CAcreateserial	\
-		-extensions v3_req	\
-		-extfile $SECRETS_DIR/openssl.conf	\
-		-out $SECRETS_DIR/tls-rancher.crt;
-
-	if [ $? -ne 0 ]; then
-		return 1;
-	fi;
-
-# Verify the certificate
-	execute openssl x509 -in $SECRETS_DIR/tls-rancher.crt -noout -text;
-
-	if [ $? -ne 0 ]; then
-		return 1;
-	fi;
-
-	if [ -f $SECRETS_DIR/tls-rancher.key -a -f $SECRETS_DIR/tls-rancher.crt ]; then
-		execute kubectl --namespace $NAMESPACE	\
-			create secret tls tls-rancher	\
-			--key=$SECRETS_DIR/tls-rancher.key	\
-			--cert=$SECRETS_DIR/tls-rancher.crt;
-
-		if [ $? -ne 0 ]; then
-			execute kubectl --namespace $NAMESPACE	\
-				apply secret tls tls-rancher	\
-				--key=$SECRETS_DIR/tls-rancher.key	\
-				--cert=$SECRETS_DIR/tls-rancher.crt
-		fi;
-	fi;
-
-	if true; then
-		#execute issuer_ca | sed -e 's?^\t*??' | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
-		YAML=$(execute issuer_ca);
-		debug "Issuer CA YAML:\n$YAML";
-		echo "$YAML" | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
-		execute rancher_ca | sed -e 's?^\t*??' | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
-	else
-	# Configure a certificate issuer
-		if [ -f $ISSUER_DIR/rancher.yaml ]; then
-			execute kubectl --namespace $NAMESPACE apply -f $ISSUER_DIR/rancher.yaml || return 1;
-		fi;
-
-	#	if [ -f $ISSUER_DIR/ca.yaml ]; then
-	#		execute kubectl --namespace $NAMESPACE apply -f $ISSUER_DIR/ca.yaml || return 1;
-	#	fi;
-
-		if [ -f $ISSUER_DIR/local-ca.yaml ]; then
-			execute kubectl --namespace $NAMESPACE apply --name=$CA_NAME -f $ISSUER_DIR/local-ca.yaml || return 1;
-		fi;
-	fi;
+	#old_namespace_ca || return $?;
+	tls_rancher || return $?;
 
 	return 0;
 }
 
 remove ()
 {
+	remove_issuer_name ()
+	{
+		#execute kubectl get --namespace $NAMESPACE issuer $1;
+		execute kubectl get --namespace $NAMESPACE issuer $1 >/dev/null 2>&1;
+
+		if [ $? -ne 0 ]; then
+			debug "namespace $NAMESPACE: issuer $1 not found";
+			return 0;
+		fi;
+
+		execute kubectl delete --namespace $NAMESPACE issuer $1;
+	}
+
 	remove_secret_name ()
 	{
-		#execute kubectl get --namespace $NAMESPACE secrets $1 || return 0;
-		#execute kubectl get --namespace $NAMESPACE secrets $1 >/dev/null 2>&1 || return 0;
 		execute kubectl get --namespace $NAMESPACE secrets $1 >/dev/null 2>&1;
 
 		if [ $? -ne 0 ]; then
@@ -312,57 +381,24 @@ remove ()
 		fi;
 
 		execute kubectl delete --namespace $NAMESPACE secrets $1 || return 1;
+
 		return 0;
 	}
 
 	remove_issuer_ca ()
 	{
-		ISSUER_NAME="ca";
-		ISSUER_NAMESPACE="$NAMESPACE";
-		ISSUER_SECRETNAME="ca";
-		ISSUER_APP="$NAMESPACE";
-		ISSUER_RELEASE="$NAMESPACE";
-
-		remove_secret_name $ISSUER_NAME || return $?;
-
+		remove_issuer_name $ISSUER_NAME || return $?;
+		remove_secret_name $ISSUER_SECRETNAME || return $?;
 		return 0;
 	}
 
 	remove_rancher_ca ()
 	{
-		ISSUER_NAME="tls-rancher";
-
-		remove_secret_name $ISSUER_NAME || return $?;
-
-		return 0;
+		remove_secret_name tls-rancher || return $?;
 	}
 
-	#execute remove_issuer_ca | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
-	#execute remove_rancher_ca | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
 	execute remove_issuer_ca || return 1;
 	execute remove_rancher_ca || return 1;
-
-#	execute kubectl --namespace $NAMESPACE	\
-#		delete secret tls tls-rancher || return 1;
-	#remove_secret_name tls-rancher || return $?;
-	#remove_secret_name tls || return $?;
-	#remove_secret_name nginx-ca || return $?;
-	#remove_secret_name local-ca || return $?;
-	#remove_secret_name ca || return $?;
-	#remove_secret_name $CA_NAME || return $?;
-	#remove_secret_name $CA_NAME2 || return $?;
-
-#	if [ -f $INSTALL_DIR/manifest/issuer/rancher.yaml ]; then
-#		execute kubectl --namespace $NAMESPACE delete -f $INSTALL_DIR/manifest/issuer/rancher.yaml || return 1;
-#	fi;
-#
-#	if [ -f $INSTALL_DIR/manifest/issuer/ca.yaml ]; then
-#		execute kubectl --namespace $NAMESPACE delete -f $INSTALL_DIR/manifest/issuer/ca.yaml || return 1;
-#	fi;
-#
-#	if [ -f $INSTALL_DIR/manifest/issuer/local-ca.yaml ]; then
-#		execute kubectl --namespace $NAMESPACE delete -f $INSTALL_DIR/manifest/issuer/local-ca.yaml || return 1;
-#	fi;
 
 	return 0;
 }
@@ -398,11 +434,26 @@ main ()
 	export SERVICE_TYPE="ClusterIP";
 	export NGINX_INGRESS=false;
 	export TRAEFIK_INGRESS=true;
-	#export CA_NAME="local-ca";
+	export SECRETS_DIR="$INSTALL_DIR/manifest/secrets";
+	export ISSUER_DIR="$INSTALL_DIR/manifest/issuer";
 	export CA_NAME="${SERVICE_NAME}-ca";
-	#export CA_NAME2="nginx-ca";
+	export CA_KEY_FILE="$SECRETS_DIR/ca.key";
+	export CA_CERT_FILE="$SECRETS_DIR/ca.crt";
+	export CA_PEM_FILE="$SECRETS_DIR/ca.pem";
+	export CA_CSR_FILE="$SECRETS_DIR/ca.csr";
 	export CA_NAME2="${NAMESPACE}-ca";
+	export ISSUER_NAME="$SERVICE_NAME";
+	export ISSUER_SECRETNAME="${SERVICE_NAME}-ca";
+	export ISSUER_NAMESPACE="$NAMESPACE";
+	export ISSUER_APP="$NAMESPACE";
+	export ISSUER_RELEASE="$NAMESPACE";
+	export OPENSSL_CONF_FILE="$SECRETS_DIR/openssl.conf";
     export REMOVE_MODE=false;
+	export TLS_RANCHER_KEY_FILE="$SECRETS_DIR/tls-rancher.key";
+	export TLS_RANCHER_CRT_FILE="$SECRETS_DIR/tls-rancher.crt";
+	export TLS_RANCHER_CSR_FILE="$SECRETS_DIR/tls-rancher.csr";
+	#export TLS_RANCHER_SECRET_NAME="tls-rancher";
+	export TLS_RANCHER_SECRET_NAME="${SERVICE_NAME}-ca";
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -423,12 +474,19 @@ main ()
             --service-name=?*)	SERVICE_NAME="${1#--service-name=}";;
             esac;
 
+			export ISSUER_NAME="$SERVICE_NAME";
+			#export ISSUER_SECRETNAME="${SERVICE_NAME}-ca";
+			export TLS_RANCHER_SECRET_NAME="${SERVICE_NAME}-ca";
 			export CA_NAME="${SERVICE_NAME}-ca";;
         --namespace|--namespace=?*)
             case "$1" in
             --namespace)	NAMESPACE="$2"; shift;;
             --namespace=?*)	NAMESPACE="${1#--namespace=}";;
-            esac;;
+            esac;
+
+			export ISSUER_NAMESPACE="$NAMESPACE";
+			export ISSUER_APP="$NAMESPACE";
+			export ISSUER_RELEASE="$NAMESPACE";;
         --verbose)	VERBOSE_MODE=true;;
         --debug)	$DEBUG_MODE && set -x; DEBUG_MODE=true; DEBUG_ARGS="$DEBUG_ARGS --debug";;
         --help) usage; return 2;;
