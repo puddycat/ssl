@@ -58,6 +58,13 @@ install ()
 		return 0;
 	}
 
+# Verify a certificate
+	verify_certificate ()
+	{
+		CERT_FILE="$1";
+		execute openssl x509 -in "$CERT_FILE" -noout -text;
+	}
+
 # Generate a new key
 	generate_new_key ()
 	{
@@ -71,13 +78,6 @@ install ()
 		execute openssl genrsa -out "$CA_KEY_FILE" 2048 || return $?;
 
 		return 0;
-	}
-
-# Verify a certificate
-	verify_certificate ()
-	{
-		CERT_FILE="$1";
-		execute openssl x509 -in "$CERT_FILE" -noout -text;
 	}
 
 # Generate a key
@@ -134,7 +134,7 @@ install ()
 			  resourceVersion: "3390"
 			spec:
 			  ca:
-			    secretName: $TLS_RANCHER_SECRET_NAME
+			    secretName: $CA_SECRET_NAME
 			EOF
 	}
 
@@ -144,7 +144,7 @@ install ()
 		{
 			#ISSUER_NAME="tls-rancher";
 			ISSUER_NAME="$CA_NAME";
-			ISSUER_SECRETNAME="$TLS_RANCHER_SECRET_NAME";
+			ISSUER_SECRETNAME="$CA_SECRET_NAME";
 			ISSUER_APP="$NAMESPACE";
 			ISSUER_RELEASE="$NAMESPACE";
 
@@ -168,25 +168,30 @@ install ()
 	#		-nodes	\
 	#		-days 365	\
 	#		-newkey rsa:2048	\
-	#		-keyout $TLS_RANCHER_KEY_FILE	\
-	#		-out $SECRETS_DIR/$TLS_RANCHER_SECRET_NAME.cert	\
+	#		-keyout $CA_KEY_FILE	\
+	#		-out $SECRETS_DIR/$CA_SECRET_NAME.cert	\
 	#		-subj "/CN=macbook-pro-2"
-		execute openssl genrsa -out "$TLS_RANCHER_KEY_FILE" 2048;
+		execute openssl genrsa -out "$CA_KEY_FILE" 2048;
 
 		if [ ! -f $OPENSSL_CONF_FILE ]; then
 			error "$OPENSSL_CONF_FILE: not found";
 			return 1;
 		fi;
 
-		if [ ! -f "$TLS_RANCHER_KEY_FILE" ]; then
-			error "$TLS_RANCHER_KEY_FILE: not found";
+		if [ ! -f "$CA_KEY_FILE" ]; then
+			error "$CA_KEY_FILE: not found";
 			return 1;
 		fi;
 
+		DAYS=3650;
+		SUBJECTDATA="/C=UK/ST=London/L=The Cloud/O=TechSquid CA";
+
+		execute openssl req -new -x509 -key "$CA_KEY_FILE" -out "$CA_CERT_FILE" -days $DAYS -sha256 -subj "$SUBJECTDATA"
+
 		execute openssl req	\
 			-new	\
-			-key "$TLS_RANCHER_KEY_FILE"	\
-			-out "$TLS_RANCHER_CSR_FILE"	\
+			-key "$CA_KEY_FILE"	\
+			-out "$CA_CSR_FILE"	\
 			-config "$OPENSSL_CONF_FILE";
 
 		if [ $? -ne 0 ]; then
@@ -196,32 +201,33 @@ install ()
 		execute openssl x509	\
 			-req	\
 			-days 365	\
-			-in "$TLS_RANCHER_CSR_FILE"	\
+			-in "$CA_CSR_FILE"	\
 			-CAkey "$CA_KEY_FILE" \
 			-CA "$CA_CERT_FILE"	\
 			-CAcreateserial	\
 			-extensions v3_req	\
 			-extfile "$OPENSSL_CONF_FILE"	\
-			-out "$TLS_RANCHER_CRT_FILE";
+			-out "$CA_CERT_FILE";
 
 		if [ $? -ne 0 ]; then
+			error "failed to generate certificate $CA_CERT_FILE";
 			return 1;
 		fi;
 
 	# Verify the certificate
-		execute verify_certificate "$TLS_RANCHER_CRT_FILE" || return 1;
+		execute verify_certificate "$CA_CERT_FILE" || return 1;
 
-		if [ -f "$TLS_RANCHER_KEY_FILE" -a -f "$TLS_RANCHER_CRT_FILE" ]; then
+		if [ -f "$CA_KEY_FILE" -a -f "$CA_CERT_FILE" ]; then
 			execute kubectl --namespace $NAMESPACE	\
-				create secret tls $TLS_RANCHER_SECRET_NAME	\
-				--key="$TLS_RANCHER_KEY_FILE"	\
-				--cert="$TLS_RANCHER_CRT_FILE";
+				create secret tls $CA_SECRET_NAME	\
+				--key="$CA_KEY_FILE"	\
+				--cert="$CA_CERT_FILE";
 
 			if [ $? -ne 0 ]; then
 				execute kubectl --namespace $NAMESPACE	\
-					apply secret tls $TLS_RANCHER_SECRET_NAME	\
-					--key="$TLS_RANCHER_KEY_FILE"	\
-					--cert="$TLS_RANCHER_CRT_FILE";
+					apply secret tls $CA_SECRET_NAME	\
+					--key="$CA_KEY_FILE"	\
+					--cert="$CA_CERT_FILE";
 			fi;
 		fi;
 
@@ -255,102 +261,8 @@ install ()
 		return 0;
 	}
 
-	old_namespace_ca ()
-	{
-	# Create CA
-	# https://deliciousbrains.com/ssl-certificate-authority-for-local-https-development/
-		generate_key || return $?;
-
-		sign_key;
-
-	# Create CA
-		if true; then
-			if [ ! -f "$OPENSSL_CONF_FILE" ]; then
-				error "$OPENSSL_CONF_FILE: not found";
-				return 1;
-			fi;
-
-			if true; then
-				if false; then
-					execute openssl req \
-						-new \
-						-newkey rsa:2048 \
-						-days 365 \
-						-nodes \
-						-x509 \
-						-subj "/C=UK/ST=London/L=The Cloud/O=TechSquid CA" \
-						-keyout "$CA_KEY_FILE" \
-						-out "$CA_CERT_FILE";
-
-					execute verify_certificate "$CA_CERT_FILE" || return 1;
-				fi;
-
-				if true; then
-					execute openssl req	\
-						-new	\
-						-key "$CA_KEY_FILE"	\
-						-out "$CA_CSR_FILE"	\
-						-config "$OPENSSL_CONF_FILE";
-
-					if [ $? -ne 0 ]; then
-						return 1;
-					fi;
-
-					execute openssl x509	\
-						-req	\
-						-days 365	\
-						-in "$CA_CSR_FILE"	\
-						-CAkey "$CA_KEY_FILE" \
-						-CA "$CA_CERT_FILE"	\
-						-CAcreateserial	\
-						-extensions v3_req	\
-						-extfile "$OPENSSL_CONF_FILE"	\
-						-out "$CA_PEM_FILE";
-
-					if [ $? -ne 0 ]; then
-						return 1;
-					fi;
-
-					execute verify_certificate "$CA_PEM_FILE" || return 1;
-				fi;
-
-				if true; then
-					if [ -f "$CA_KEY_FILE" -a -f "$CA_PEM_FILE" ]; then
-						execute kubectl	\
-							create secret tls $CA_NAME	\
-							--namespace $NAMESPACE	\
-							--key="$CA_KEY_FILE"	\
-							--cert="$CA_PEM_FILE";
-					fi;
-				fi;
-			fi;
-
-			if false; then
-				if [ -f $CA_KEY_FILE -a -f $CA_CERT_FILE ]; then
-					execute kubectl	\
-						create secret tls $CA_NAME2	\
-						--namespace $NAMESPACE	\
-						--key="$CA_KEY_FILE"	\
-						--cert="$CA_CERT_FILE";
-
-					if [ $? -ne 0 ]; then
-						execute kubectl	\
-							apply secret tls $CA_NAME	\
-							--namespace $NAMESPACE	\
-							--key="$CA_KEY_FILE"	\
-							--cert="$CA_CERT_FILE";
-					fi;
-				fi;
-			fi;
-		fi;
-
-	# Verify the certificate
-	#	execute openssl x509 -in $CA_CERT_FILE -noout -text;
-	}
-
 	create_namespaces || return $?;
 
-	#old_namespace_ca || return $?;
 	tls_rancher || return $?;
 
 	return 0;
@@ -360,7 +272,6 @@ remove ()
 {
 	remove_issuer_name ()
 	{
-		#execute kubectl get --namespace $NAMESPACE issuer $1;
 		execute kubectl get --namespace $NAMESPACE issuer $1 >/dev/null 2>&1;
 
 		if [ $? -ne 0 ]; then
@@ -441,6 +352,7 @@ main ()
 	export CA_CERT_FILE="$SECRETS_DIR/ca.crt";
 	export CA_PEM_FILE="$SECRETS_DIR/ca.pem";
 	export CA_CSR_FILE="$SECRETS_DIR/ca.csr";
+	export CA_SECRET_NAME="${SERVICE_NAME}-ca";
 	export CA_NAME2="${NAMESPACE}-ca";
 	export ISSUER_NAME="$SERVICE_NAME";
 	export ISSUER_SECRETNAME="${SERVICE_NAME}-ca";
@@ -449,11 +361,6 @@ main ()
 	export ISSUER_RELEASE="$NAMESPACE";
 	export OPENSSL_CONF_FILE="$SECRETS_DIR/openssl.conf";
     export REMOVE_MODE=false;
-	export TLS_RANCHER_KEY_FILE="$SECRETS_DIR/tls-rancher.key";
-	export TLS_RANCHER_CRT_FILE="$SECRETS_DIR/tls-rancher.crt";
-	export TLS_RANCHER_CSR_FILE="$SECRETS_DIR/tls-rancher.csr";
-	#export TLS_RANCHER_SECRET_NAME="tls-rancher";
-	export TLS_RANCHER_SECRET_NAME="${SERVICE_NAME}-ca";
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -476,7 +383,7 @@ main ()
 
 			export ISSUER_NAME="$SERVICE_NAME";
 			#export ISSUER_SECRETNAME="${SERVICE_NAME}-ca";
-			export TLS_RANCHER_SECRET_NAME="${SERVICE_NAME}-ca";
+			export CA_SECRET_NAME="${SERVICE_NAME}-ca";
 			export CA_NAME="${SERVICE_NAME}-ca";;
         --namespace|--namespace=?*)
             case "$1" in
