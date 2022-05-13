@@ -188,6 +188,14 @@ install ()
 
 		execute openssl req -new -x509 -key "$CA_KEY_FILE" -out "$CA_CERT_FILE" -days $DAYS -sha256 -subj "$SUBJECTDATA"
 
+		if [ $? -ne 0 ]; then
+			error "failed to generate certificate $CA_CERT_FILE";
+			return 1;
+		fi;
+
+	# Verify the certificate
+		execute verify_certificate "$CA_CERT_FILE" || return 1;
+
 		execute openssl req	\
 			-new	\
 			-key "$CA_KEY_FILE"	\
