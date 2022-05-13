@@ -183,9 +183,6 @@ install ()
 			return 1;
 		fi;
 
-		DAYS=3650;
-		SUBJECTDATA="/C=UK/ST=London/L=The Cloud/O=TechSquid CA";
-
 		execute openssl req -new -x509 -key "$CA_KEY_FILE" -out "$CA_CERT_FILE" -days $DAYS -sha256 -subj "$SUBJECTDATA"
 
 		if [ $? -ne 0 ]; then
@@ -208,7 +205,7 @@ install ()
 
 		execute openssl x509	\
 			-req	\
-			-days 365	\
+			-days $DAYS	\
 			-in "$CA_CSR_FILE"	\
 			-CAkey "$CA_KEY_FILE" \
 			-CA "$CA_CERT_FILE"	\
@@ -369,6 +366,8 @@ main ()
 	export ISSUER_RELEASE="$NAMESPACE";
 	export OPENSSL_CONF_FILE="$SECRETS_DIR/openssl.conf";
     export REMOVE_MODE=false;
+	export DAYS=365;
+	export SUBJECTDATA="/C=UK/ST=London/L=The Cloud/O=TechSquid CA";
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -390,7 +389,7 @@ main ()
             esac;
 
 			export ISSUER_NAME="$SERVICE_NAME";
-			#export ISSUER_SECRETNAME="${SERVICE_NAME}-ca";
+			export ISSUER_SECRETNAME="${SERVICE_NAME}-ca";
 			export CA_SECRET_NAME="${SERVICE_NAME}-ca";
 			export CA_NAME="${SERVICE_NAME}-ca";;
         --namespace|--namespace=?*)
@@ -399,9 +398,12 @@ main ()
             --namespace=?*)	NAMESPACE="${1#--namespace=}";;
             esac;
 
+			export ISSUER_NAME="$NAMESPACE";
 			export ISSUER_NAMESPACE="$NAMESPACE";
 			export ISSUER_APP="$NAMESPACE";
-			export ISSUER_RELEASE="$NAMESPACE";;
+			export ISSUER_RELEASE="$NAMESPACE";
+			export ISSUER_SECRETNAME="${NAMESPACE}-ca";
+			export CA_SECRET_NAME="${NAMESPACE}-ca";;
         --verbose)	VERBOSE_MODE=true;;
         --debug)	$DEBUG_MODE && set -x; DEBUG_MODE=true; DEBUG_ARGS="$DEBUG_ARGS --debug";;
         --help) usage; return 2;;
