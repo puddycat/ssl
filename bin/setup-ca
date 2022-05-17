@@ -350,6 +350,7 @@ main ()
 	export SERVICE_TYPE="ClusterIP";
 	export NGINX_INGRESS=false;
 	export TRAEFIK_INGRESS=true;
+	export CONFIG_DIR="$INSTALL_DIR/etc";
 	export SECRETS_DIR="$INSTALL_DIR/manifest/secrets";
 	export ISSUER_DIR="$INSTALL_DIR/manifest/issuer";
 	export CA_NAME="${SERVICE_NAME}-ca";
@@ -364,7 +365,7 @@ main ()
 	export ISSUER_NAMESPACE="$NAMESPACE";
 	export ISSUER_APP="$NAMESPACE";
 	export ISSUER_RELEASE="$NAMESPACE";
-	export OPENSSL_CONF_FILE="$SECRETS_DIR/openssl.conf";
+	export OPENSSL_CONF_FILE="$CONFIG_DIR/openssl.conf";
     export REMOVE_MODE=false;
 	export DAYS=365;
 	export SUBJECTDATA="/C=UK/ST=London/L=The Cloud/O=TechSquid CA";
