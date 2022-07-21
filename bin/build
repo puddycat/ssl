@@ -42,8 +42,8 @@ main ()
         cat <<-EOF >&2
 			$PROGNAME: usage: $PROGNAME [--help] [--debug] [--verbose] [--noop] [--config-dir {path}] [--image-name {name}] [--image-tag {tag}]
 
-            --image-name {name}         Specify the Docker image tag (default: $DOCKER_IMAGE_NAME)
-            --image-tag {tag}           Specify the Docker image tag (default: $DOCKER_IMAGE_TAG)
+			--image-name {name}         Specify the Docker image tag (default: $DOCKER_IMAGE_NAME)
+			--image-tag {tag}           Specify the Docker image tag (default: $DOCKER_IMAGE_TAG)
 			--config-dir {path}         Specify the configuration directory (default: $CONFIG_DIR)
 			--noop                      Don't perform the operation, just report the actions that would be carried out.
 			--verbose                   Enable verbose mode.
@@ -157,6 +157,13 @@ main ()
 
 	if [ $? -ne 0 ]; then
 		error "Failed to build $DST_IMAGE";
+		return 1;
+	fi;
+
+	execute docker push $DST_IMAGE;
+
+	if [ $? -ne 0 ]; then
+		error "Failed to push $DST_IMAGE";
 		return 1;
 	fi;
 
