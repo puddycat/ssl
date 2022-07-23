@@ -1,0 +1,13 @@
+# Default values for SSL.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+name: "ssl"
+# helm.go:81: [debug] CronJob.batch "ssl" is invalid: [spec.schedule: Required value, spec.jobTemplate.spec.template.spec.containers: Required value, spec.jobTemplate.spec.template.spec.restartPolicy: Required value: valid values: "OnFailure", "Never"]
+restartPolicy: Never
+schedule: '"30 10 * * *"'
+
+image:
+  repository: raymondstrose/ssl
+  tag: 0.0.1
+  pullPolicy: IfNotPresent 
