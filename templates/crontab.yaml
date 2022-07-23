@@ -1,5 +1,28 @@
-apiVersion: stable.example.com
-kind: CronTab
+{{/*
+Cronjob to setup a namespace SSL CA.
+*/}}
+apiVersion: batch/v1beta1
+kind: CronJob
 metadata:
+  annotations:
+    field.cattle.io/description: Renew SSL certificate
+{{/*
   name: {{ .Values.name }}
+*/}}
+  name: {{ .Release.Namespace }}-{{ .Values.name }}
 spec:
+  schedule: {{ .Values.schedule }}
+  successfulJobsHistoryLimit: 2 
+  jobTemplate:
+    spec:
+      template:
+        spec:       
+          containers:
+          - name: {{ .Chart.Name }}
+            image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+            imagePullPolicy: {{ .Values.image.pullPolicy }} 
+            args:
+              - setup-ca
+              - --debug
+              - --verbose
+          restartPolicy: {{ .Values.restartPolicy }}
