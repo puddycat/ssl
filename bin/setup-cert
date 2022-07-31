@@ -1,0 +1,431 @@
+#! /usr/bin/env bash
+#
+# ssl/bin/setup-cert
+#
+# raymondstrose@hotmail.com
+#
+#   Setup an SSL certificate.
+#
+
+append () { sed -e "s?\$?$@?"; }
+prepend () { sed -e "s?^?$@?"; }
+indent () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "    "; }
+error () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: error: " >&2; }
+warning () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: warning: " >&2; }
+notice () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: notice: " >&2; }
+info () { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: info: " >&2; }
+verbose () { $VERBOSE_MODE && { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: verbose: " >&2; } }
+debug () { $DEBUG_MODE && { { if [ $# -ne 0 ]; then echo -e "$@"; else cat; fi; } | prepend "$PROGNAME: debug: " >&2; } }
+
+function execute ()
+{
+    declare -a params;
+
+    for param; do
+        if [[ -z "${param}" || "${param}" =~ [^A-Za-z0-9_@%+=:,./-] ]]; then
+            params+=("'${param//\'/\'\"\'\"\'}'");
+        else
+            params+=("${param}");
+        fi;
+    done;
+
+    debug "${params[*]}";
+    eval ${params[*]};
+}
+
+apply_manifests ()
+{
+	debug "Applying manifests:";
+	exit_code=0;
+
+	for name in manifest/*.yaml; do
+		debug "Applying manifest: $name";
+		kubectl apply -f "$name" || exit_code=1;
+	done;
+
+	return $exit_code;
+}
+
+install ()
+{
+# Create namespace(s)
+	create_namespaces ()
+	{
+		if [ -f  $INSTALL_DIR/manifest/namespace.yaml ]; then
+			execute kubectl apply -f $INSTALL_DIR/manifest/namespace.yaml || return 1;
+		fi;
+
+		return 0;
+	}
+
+# Verify a certificate
+	verify_certificate ()
+	{
+		CERT_FILE="$1";
+		execute openssl x509 -in "$CERT_FILE" -noout -text;
+	}
+
+# Generate a new key
+	generate_new_key ()
+	{
+		CERT_KEY_DIR="$(dirname $CERT_KEY_FILE)";
+
+		if [ ! -d  "$CERT_KEY_DIR" ]; then
+			execute mkdir -p "$CERT_KEY_DIR" || return 1;
+		fi;
+
+		#execute openssl genrsa -des3 -out "$CERT_KEY_FILE" 2048 || return $?;
+		execute openssl genrsa -out "$CERT_KEY_FILE" 2048 || return $?;
+
+		return 0;
+	}
+
+# Generate a key
+	generate_key ()
+	{
+		if [ -f "$CERT_KEY_FILE" ]; then
+			return 0;
+		fi;
+
+		generate_new_key || return $?;
+
+		return 0;
+	}
+
+	sign_key ()
+	{
+		execute openssl req	\
+			-x509	\
+			-new	\
+			-nodes	\
+			-key "$CERT_KEY_FILE"	\
+			-sha256	\
+			-days 1825	\
+			-subj "/C=UK/ST=London/L=The Cloud/O=TechSquid Certificate" \
+			-out "$CERT_PEM_FILE";
+
+		execute verify_certificate "$CERT_PEM_FILE" || return 1;
+
+		if true; then
+			if [ -f "$CERT_KEY_FILE" -a -f "$CERT_PEM_FILE" ]; then
+				execute kubectl	\
+					create secret tls $CERT_NAME	\
+					--namespace $NAMESPACE	\
+					--key="$CERT_KEY_FILE"	\
+					--cert="$CERT_PEM_FILE";
+			fi;
+		fi;
+
+		return 0;
+	}
+
+	issuer_ca ()
+	{
+		cat <<-EOF | sed -e 's?^\t*??'
+			kind: Issuer
+			apiVersion: cert-manager.io/v1
+			metadata:
+			  generation: 1
+			  labels:
+			    app: $ISSUER_APP
+			    release: $ISSUER_RELEASE
+			  name: $ISSUER_NAME
+			  namespace: $ISSUER_NAMESPACE
+			  resourceVersion: "3390"
+			spec:
+			  ca:
+			    secretName: $CERT_SECRET_NAME
+			EOF
+	}
+
+	tls_rancher ()
+	{
+		rancher_ca ()
+		{
+			#ISSUER_NAME="tls-rancher";
+			ISSUER_NAME="$CERT_NAME";
+			ISSUER_SECRETNAME="$CERT_SECRET_NAME";
+			ISSUER_APP="$NAMESPACE";
+			ISSUER_RELEASE="$NAMESPACE";
+
+			cat <<-EOF | sed -e 's?^\t*??'
+				apiVersion: cert-manager.io/v1
+				kind: Issuer
+				metadata:
+				  labels:
+					app: $ISSUER_APP
+					release: $ISSUER_RELEASE
+				  name: $ISSUER_NAME
+				  resourceVersion: "0"
+				spec:
+				  ca:
+					secretName: $ISSUER_SECRETNAME
+				EOF
+		}
+
+	# Configure secrets
+	#	execute openssl req -x509	\
+	#		-nodes	\
+	#		-days 365	\
+	#		-newkey rsa:2048	\
+	#		-keyout $CERT_KEY_FILE	\
+	#		-out $SECRETS_DIR/$CERT_SECRET_NAME.cert	\
+	#		-subj "/CN=macbook-pro-2"
+		execute openssl genrsa -out "$CERT_KEY_FILE" 2048;
+
+		if [ ! -f $OPENSSL_CONF_FILE ]; then
+			error "$OPENSSL_CONF_FILE: not found";
+			return 1;
+		fi;
+
+		if [ ! -f "$CERT_KEY_FILE" ]; then
+			error "$CERT_KEY_FILE: not found";
+			return 1;
+		fi;
+
+		execute openssl req -new -x509 -key "$CERT_KEY_FILE" -out "$CERT_CERT_FILE" -days $DAYS -sha256 -subj "$SUBJECTDATA"
+
+		if [ $? -ne 0 ]; then
+			error "failed to generate certificate $CERT_CERT_FILE";
+			return 1;
+		fi;
+
+	# Verify the certificate
+		execute verify_certificate "$CERT_CERT_FILE" || return 1;
+
+		execute openssl req	\
+			-new	\
+			-key "$CERT_KEY_FILE"	\
+			-out "$CERT_CSR_FILE"	\
+			-config "$OPENSSL_CONF_FILE";
+
+		if [ $? -ne 0 ]; then
+			return 1;
+		fi;
+
+		execute openssl x509	\
+			-req	\
+			-days $DAYS	\
+			-in "$CERT_CSR_FILE"	\
+			-CAkey "$CERT_KEY_FILE" \
+			-CA "$CERT_CERT_FILE"	\
+			-CAcreateserial	\
+			-extensions v3_req	\
+			-extfile "$OPENSSL_CONF_FILE"	\
+			-out "$CERT_CERT_FILE";
+
+		if [ $? -ne 0 ]; then
+			error "failed to generate certificate $CERT_CERT_FILE";
+			return 1;
+		fi;
+
+	# Verify the certificate
+		execute verify_certificate "$CERT_CERT_FILE" || return 1;
+
+		if [ -f "$CERT_KEY_FILE" -a -f "$CERT_CERT_FILE" ]; then
+			execute kubectl --namespace $NAMESPACE	\
+				create secret tls $CERT_SECRET_NAME	\
+				--key="$CERT_KEY_FILE"	\
+				--cert="$CERT_CERT_FILE";
+
+			if [ $? -ne 0 ]; then
+				execute kubectl --namespace $NAMESPACE	\
+					apply secret tls $CERT_SECRET_NAME	\
+					--key="$CERT_KEY_FILE"	\
+					--cert="$CERT_CERT_FILE";
+			fi;
+		fi;
+
+		if true; then
+			if false; then
+				YAML=$(execute rancher_ca);
+				debug "Rancher Certificate YAML:\n$YAML";
+				echo "$YAML" | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
+			fi;
+
+			if true; then
+				YAML=$(execute issuer_ca);
+				debug "Issuer Certificate YAML:\n$YAML";
+				echo "$YAML" | execute kubectl --namespace $NAMESPACE apply -f - || return 1;
+			fi;
+		else
+		# Configure a certificate issuer
+			if [ -f $ISSUER_DIR/rancher.yaml ]; then
+				execute kubectl --namespace $NAMESPACE apply -f $ISSUER_DIR/rancher.yaml || return 1;
+			fi;
+
+		#	if [ -f $ISSUER_DIR/ca.yaml ]; then
+		#		execute kubectl --namespace $NAMESPACE apply -f $ISSUER_DIR/ca.yaml || return 1;
+		#	fi;
+
+			if [ -f $ISSUER_DIR/local-cert.yaml ]; then
+				execute kubectl --namespace $NAMESPACE apply --name=$CERT_NAME -f $ISSUER_DIR/local-cert.yaml || return 1;
+			fi;
+		fi;
+
+		return 0;
+	}
+
+	create_namespaces || return $?;
+
+	tls_rancher || return $?;
+
+	return 0;
+}
+
+remove ()
+{
+	remove_issuer_name ()
+	{
+		execute kubectl get --namespace $NAMESPACE issuer $1 >/dev/null 2>&1;
+
+		if [ $? -ne 0 ]; then
+			debug "namespace $NAMESPACE: issuer $1 not found";
+			return 0;
+		fi;
+
+		execute kubectl delete --namespace $NAMESPACE issuer $1;
+	}
+
+	remove_secret_name ()
+	{
+		execute kubectl get --namespace $NAMESPACE secrets $1 >/dev/null 2>&1;
+
+		if [ $? -ne 0 ]; then
+			debug "namespace $NAMESPACE: secret $1 not found";
+			return 0;
+		fi;
+
+		execute kubectl delete --namespace $NAMESPACE secrets $1 || return 1;
+
+		return 0;
+	}
+
+	remove_issuer_ca ()
+	{
+		remove_issuer_name $ISSUER_NAME || return $?;
+		remove_secret_name $ISSUER_SECRETNAME || return $?;
+		return 0;
+	}
+
+	remove_rancher_ca ()
+	{
+		remove_secret_name tls-rancher || return $?;
+	}
+
+	execute remove_issuer_ca || return 1;
+	execute remove_rancher_ca || return 1;
+
+	return 0;
+}
+
+main ()
+{
+    usage ()
+    {
+        cat <<-EOF >&2
+			$PROGNAME: usage: $PROGNAME [--help] [--debug] [--remove] [--namespace {name}] [--service-type {name}] [--service-name {name}] [--deployment-name {name}]
+
+			--service-type {name}          Specify the service type (default: $SERVICE_TYPE)
+			--service-name {name}          Specify the service name (default: $SERVICE_NAME)
+			--deployment-name {name}       Specify the deployment name (default: $DEPLOYMENT_NAME)
+			--namespace {name}             Specify the Kubernetes namespace (default: $NAMESPACE)
+			--remove                       Remove the Certificate (default: $REMOVE_MODE)
+			--help                         Display this usage information.
+			--debug                        Enable debug mode.
+			EOF
+
+        return 0;
+    }
+
+    export PROGNAME=`basename "$0"`;
+    export PROGDIR=`dirname "$0"`;
+    export INSTALL_DIR=`dirname "$PROGDIR"`; [ "$INSTALL_DIR" = "." ] && INSTALL_DIR=$(pwd);
+    export DEBUG_MODE=false;
+    export DEBUG_ARGS="";
+    export VERBOSE_MODE=false;
+	export NAMESPACE="ssl";
+	export DEPLOYMENT_NAME="ssl";
+	export SERVICE_NAME="ssl";
+	export SERVICE_TYPE="ClusterIP";
+	export NGINX_INGRESS=false;
+	export TRAEFIK_INGRESS=true;
+	export CONFIG_DIR="$INSTALL_DIR/etc";
+	export SECRETS_DIR="$INSTALL_DIR/manifest/secrets";
+	export ISSUER_DIR="$INSTALL_DIR/manifest/issuer";
+	export CERT_NAME="${SERVICE_NAME}-cert";
+	export CERT_KEY_FILE="$SECRETS_DIR/ca.key";
+	export CERT_CERT_FILE="$SECRETS_DIR/ca.crt";
+	export CERT_PEM_FILE="$SECRETS_DIR/ca.pem";
+	export CERT_CSR_FILE="$SECRETS_DIR/ca.csr";
+	export CERT_SECRET_NAME="${SERVICE_NAME}-cert";
+	export CERT_NAME2="${NAMESPACE}-cert";
+	export ISSUER_NAME="$SERVICE_NAME";
+	export ISSUER_SECRETNAME="${SERVICE_NAME}-cert";
+	export ISSUER_NAMESPACE="$NAMESPACE";
+	export ISSUER_APP="$NAMESPACE";
+	export ISSUER_RELEASE="$NAMESPACE";
+	#export OPENSSL_CONF_FILE="$CONFIG_DIR/openssl.conf";
+	export OPENSSL_CONF_FILE="$CONFIG_DIR/openssl-cert.conf";
+    export REMOVE_MODE=false;
+	export DAYS=365;
+	export SUBJECTDATA="/C=UK/ST=London/L=The Cloud/O=TechSquid Certificate";
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --remove)    REMOVE_MODE=true;;
+        --deployment-name|--deployment-name=?*)
+            case "$1" in
+            --deployment-name)	DEPLOYMENT_NAME="$2"; shift;;
+            --deployment-name=?*)	DEPLOYMENT_NAME="${1#--deployment-name=}";;
+            esac;;
+        --service-type|--service-type=?*)
+            case "$1" in
+            --service-type)	SERVICE_TYPE="$2"; shift;;
+            --service-type=?*)	SERVICE_TYPE="${1#--service-type=}";;
+            esac;;
+        --service-name|--service-name=?*)
+            case "$1" in
+            --service-name)	SERVICE_NAME="$2"; shift;;
+            --service-name=?*)	SERVICE_NAME="${1#--service-name=}";;
+            esac;
+
+			export ISSUER_NAME="$SERVICE_NAME";
+			export ISSUER_SECRETNAME="${SERVICE_NAME}-cert";
+			export CERT_SECRET_NAME="${SERVICE_NAME}-cert";
+			export CERT_NAME="${SERVICE_NAME}-cert";;
+        --namespace|--namespace=?*)
+            case "$1" in
+            --namespace)	NAMESPACE="$2"; shift;;
+            --namespace=?*)	NAMESPACE="${1#--namespace=}";;
+            esac;
+
+			export ISSUER_NAME="$NAMESPACE";
+			export ISSUER_NAMESPACE="$NAMESPACE";
+			export ISSUER_APP="$NAMESPACE";
+			export ISSUER_RELEASE="$NAMESPACE";
+			export ISSUER_SECRETNAME="${NAMESPACE}-cert";
+			export CERT_SECRET_NAME="${NAMESPACE}-cert";;
+        --verbose)	VERBOSE_MODE=true;;
+        --debug)	$DEBUG_MODE && set -x; DEBUG_MODE=true; DEBUG_ARGS="$DEBUG_ARGS --debug";;
+        --help) usage; return 2;;
+        -*)	error "unknown option \"$1\"";
+            usage; return 1;;
+        *)	error "unknown option \"$1\"";
+            usage; return 1;;
+        esac;
+
+        shift;
+    done;
+
+	if $REMOVE_MODE; then
+		remove || return $?;
+	else
+		install || return $?;
+	fi;
+
+	return 0;
+}
+
+	main "$@";
+
